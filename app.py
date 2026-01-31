@@ -6,166 +6,154 @@ from streamlit_folium import st_folium
 from datetime import datetime
 
 # ---------------- CONFIG ----------------
-API_KEY = "3620fe53587168fe56bd2f6093b7fb9b"
+WAQI_TOKEN = "176165c0a8c431b3c5fe786ad9286ed5be4e652f"
 REFRESH_SECONDS = 600  # 10 minutes
 
-# ---------------- LOCATIONS (EXPANDED MUMBAI) ----------------
+# ---------------- LOCATIONS (Mumbai-wide) ----------------
 locations = {
-    # South Mumbai
-    "Colaba": (18.91, 72.82),
-    "Marine Lines": (18.94, 72.82),
-    "Byculla": (18.98, 72.83),
-
-    # Central Line
-    "Dadar": (19.02, 72.84),
-    "Parel": (19.00, 72.83),
-    "Kurla": (19.07, 72.88),
-    "Ghatkopar": (19.08, 72.91),
-    "Mulund": (19.17, 72.95),
-
-    # Western Suburbs
-    "Bandra": (19.06, 72.83),
-    "Andheri": (19.12, 72.85),
-    "Goregaon": (19.15, 72.85),
-    "Malad": (19.18, 72.84),
-    "Borivali": (19.23, 72.86),
-
-    # Harbour / Navi Mumbai
-    "Vashi": (19.07, 72.99),
-    "Nerul": (19.03, 73.02),
+    "Colaba": (18.9067, 72.8147),
+    "Worli": (19.0176, 72.8562),
+    "Dadar": (19.0178, 72.8478),
+    "Bandra": (19.0596, 72.8295),
+    "Andheri": (19.1197, 72.8468),
+    "Kurla": (19.0726, 72.8845),
+    "Ghatkopar": (19.0856, 72.9081),
+    "Chembur": (19.0623, 72.9005),
+    "Powai": (19.1176, 72.9060),
+    "Mulund": (19.1726, 72.9565),
+    "Vashi": (19.0771, 72.9986),
 }
 
-# ---------------- AQI LOGIC (INDIAN STANDARD STYLE) ----------------
-def pm25_to_aqi(pm):
-    if pm <= 30:
-        return "Good", "green"
-    elif pm <= 60:
-        return "Satisfactory", "lightgreen"
-    elif pm <= 90:
-        return "Moderate", "orange"
-    elif pm <= 120:
-        return "Poor", "red"
-    elif pm <= 250:
-        return "Very Poor", "darkred"
-    else:
-        return "Severe", "black"
+# ---------------- FUNCTIONS ----------------
+def fetch_waqi(lat, lon):
+    url = f"https://api.waqi.info/feed/geo:{lat};{lon}/?token={WAQI_TOKEN}"
+    r = requests.get(url, timeout=10).json()
 
-def health_advice(aqi_status, persona):
-    advice_map = {
-        "Good": "Air quality is good. Enjoy outdoor activities.",
+    if r["status"] != "ok":
+        return None
+
+    data = r["data"]
+    aqi = data.get("aqi", None)
+    pm25 = data.get("iaqi", {}).get("pm25", {}).get("v", None)
+    station = data.get("city", {}).get("name", "Unknown")
+    time_str = data.get("time", {}).get("s", None)
+
+    return aqi, pm25, station, time_str
+
+def aqi_category(aqi):
+    if aqi <= 50: return "Good"
+    elif aqi <= 100: return "Satisfactory"
+    elif aqi <= 200: return "Moderate"
+    elif aqi <= 300: return "Poor"
+    elif aqi <= 400: return "Very Poor"
+    else: return "Severe"
+
+def health_advice(aqi, persona):
+    base = {
+        "Good": "Safe for all outdoor activities.",
         "Satisfactory": "Minor discomfort possible for sensitive individuals.",
-        "Moderate": "People with asthma or heart disease should limit exposure.",
-        "Poor": "Avoid prolonged outdoor exertion.",
-        "Very Poor": "Stay indoors. Serious health risk.",
-        "Severe": "Health emergency. Avoid all outdoor activity."
+        "Moderate": "Avoid prolonged outdoor exertion.",
+        "Poor": "Limit outdoor exposure. Masks recommended.",
+        "Very Poor": "Avoid outdoor activity. Health effects likely.",
+        "Severe": "Stay indoors. Serious health risk."
     }
 
-    advice = advice_map[aqi_status]
+    category = aqi_category(aqi)
+    advice = base[category]
 
-    if persona == "Children / Elderly" and aqi_status in ["Moderate", "Poor", "Very Poor", "Severe"]:
-        advice += " Children and elderly should strictly stay indoors."
+    if persona == "Children / Elderly" and aqi > 100:
+        advice += " Extra caution advised for vulnerable groups."
+    if persona == "Outdoor Workers" and aqi > 150:
+        advice += " Use N95 masks and take frequent breaks."
 
-    if persona == "Outdoor Workers" and aqi_status in ["Poor", "Very Poor", "Severe"]:
-        advice += " Masks and frequent breaks are strongly advised."
+    return category, advice
 
-    return advice
-
-# ---------------- DATA FETCH ----------------
-def fetch_pm25(lat, lon):
-    url = f"http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={lon}&appid={API_KEY}"
-    data = requests.get(url).json()
-    return data["list"][0]["components"]["pm2_5"]
-
-def forecast_pm25(pm):
-    # realistic short-term trend
-    return round(pm * 1.04 if pm < 100 else pm * 1.02, 1)
-
-# ---------------- UI SETUP ----------------
-st.set_page_config(page_title="AeroGuard", layout="wide")
+# ---------------- STREAMLIT CONFIG ----------------
+st.set_page_config(page_title="AeroGuard – Mumbai AQI", layout="wide")
 st.markdown(f"<meta http-equiv='refresh' content='{REFRESH_SECONDS}'>", unsafe_allow_html=True)
 
-st.title("🌬️ AeroGuard – Live Mumbai Air Quality Intelligence")
+# ---------------- UI ----------------
+st.title("🌬️ AeroGuard – Live Mumbai Air Quality (Sensor-Based)")
 
 persona = st.selectbox(
     "Select User Category",
     ["General Public", "Children / Elderly", "Outdoor Workers"]
 )
 
-last_updated = datetime.now().strftime("%d %b %Y, %I:%M %p")
-st.caption(f"Last updated: {last_updated}")
-
 rows = []
+last_updated_times = []
 
 for loc, (lat, lon) in locations.items():
-    pm_now = fetch_pm25(lat, lon)
-    pm_future = forecast_pm25(pm_now)
+    result = fetch_waqi(lat, lon)
+    if result is None:
+        continue
 
-    aqi_now, color = pm25_to_aqi(pm_now)
-    aqi_future, _ = pm25_to_aqi(pm_future)
-
-    advice = health_advice(aqi_now, persona)
+    aqi, pm25, station, time_str = result
+    category, advice = health_advice(aqi, persona)
 
     rows.append([
         loc,
-        round(pm_now, 1),
-        round(pm_future, 1),
-        aqi_now,
-        aqi_future,
-        advice,
-        color
+        station,
+        aqi,
+        category,
+        pm25,
+        advice
     ])
 
+    if time_str:
+        last_updated_times.append(time_str)
+
 df = pd.DataFrame(rows, columns=[
-    "Location",
-    "PM2.5 Now (µg/m³)",
-    "PM2.5 Forecast (6–12h)",
-    "AQI Status Now",
-    "AQI Status Forecast",
-    "Health Advice",
-    "Color"
+    "Area",
+    "Nearest Station",
+    "AQI",
+    "Category",
+    "PM2.5 (µg/m³)",
+    "Health Advice"
 ])
 
-# ---------------- TABLE ----------------
-st.subheader("📊 Live Air Quality Table")
-st.dataframe(
-    df.drop(columns=["Color"]),
-    use_container_width=True,
-    hide_index=True
-)
-
-# ---------------- BAR CHART ----------------
-st.subheader("📈 PM2.5 Comparison")
-st.bar_chart(df.set_index("Location")[[
-    "PM2.5 Now (µg/m³)",
-    "PM2.5 Forecast (6–12h)"
-]])
+st.subheader("📊 Live AQI Table (Real Sensor Data)")
+st.dataframe(df, use_container_width=True)
 
 # ---------------- MAP ----------------
-m = folium.Map(location=[19.07, 72.85], zoom_start=11)
+m = folium.Map(location=[19.07, 72.88], zoom_start=11)
+
+def aqi_color(aqi):
+    if aqi <= 50: return "green"
+    elif aqi <= 100: return "lightgreen"
+    elif aqi <= 200: return "orange"
+    elif aqi <= 300: return "red"
+    elif aqi <= 400: return "darkred"
+    else: return "black"
 
 for _, r in df.iterrows():
     folium.CircleMarker(
-        location=locations[r["Location"]],
-        radius=9,
-        color=r["Color"],
+        location=locations[r["Area"]],
+        radius=10,
+        color=aqi_color(r["AQI"]),
         fill=True,
-        fill_opacity=0.85,
+        fill_opacity=0.8,
         popup=f"""
-        <b>{r['Location']}</b><br>
-        PM2.5: {r['PM2.5 Now (µg/m³)']}<br>
-        AQI: {r['AQI Status Now']}
+        <b>{r['Area']}</b><br>
+        Station: {r['Nearest Station']}<br>
+        AQI: {r['AQI']} ({r['Category']})<br>
+        PM2.5: {r['PM2.5 (µg/m³)']}
         """
     ).add_to(m)
 
-st.subheader("🗺️ Mumbai AQI Live Map")
-st_folium(m, width=1100, height=520)
+st.subheader("🗺️ Mumbai Live AQI Map")
+st_folium(m, width=900, height=500)
 
-# ---------------- EXPLANATION ----------------
-st.subheader("🔍 How AeroGuard Works")
+# ---------------- FOOTER ----------------
+if last_updated_times:
+    latest_time = max(last_updated_times)
+    st.caption(f"🕒 Last updated from CPCB/WAQI sensors at: {latest_time}")
+
+st.subheader("ℹ️ How AeroGuard Works")
 st.markdown("""
-• Fetches **live PM2.5 data** from OpenWeather stations  
-• Converts pollution levels to **Indian AQI categories**  
-• Forecasts short-term AQI trends using realistic variation  
-• Health advice is **personalized** for different user groups  
-• Auto-refreshes every **10 minutes** for near real-time accuracy  
+• Uses **WAQI (World Air Quality Index)** real-time sensor data  
+• Data sourced from **CPCB & SAFAR monitoring stations**  
+• No estimation or artificial AQI calculation  
+• Personalized health guidance for different user groups  
+• Auto-refreshes every 10 minutes  
 """)
