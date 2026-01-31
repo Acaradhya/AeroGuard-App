@@ -168,7 +168,6 @@ st.line_chart([now_val,fut_val])
 # ---------------- MAP ----------------
 st.subheader("🗺️ Mumbai AQI Map (Trend-Based Coloring)")
 m = folium.Map(location=[19.07,72.88], zoom_start=11)
-
 for i,r in df.iterrows():
     trend = r["AQI (6h Forecast)"] - r["AQI Now"]
     base_color = colors[i]
@@ -190,15 +189,4 @@ for i,r in df.iterrows():
         fill_opacity=0.8,
         popup=f"<b>{r['Area']}</b><br>AQI Now: {r['AQI Now']}<br>Forecast (6h): {r['AQI (6h Forecast)']}<br>Trend: {'⬆️' if trend>0 else '⬇️' if trend<0 else '➡️'} {trend:+}"
     ).add_to(m)
-
 st_folium(m,width=1100,height=500)
-
-# ---------------- EXPLANATION ----------------
-st.subheader("ℹ️ How the AI Forecast Works")
-st.markdown("""
-• Uses **real CPCB / SAFAR sensor data** via WAQI  
-• Maintains **rolling AQI history (last 6–12 hours)**  
-• Applies **time-series trend analysis** for short-term forecasting  
-• Predicts **AQI for the next 6 hours**  
-• Advice is **personalized, explainable, and risk-aware**
-""")
