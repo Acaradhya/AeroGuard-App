@@ -5,8 +5,7 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime, timedelta
 import os
-from concurrent.futures import ThreadPoolExecutor
-from streamlit_autorefresh import st_autorefresh
+import matplotlib.pyplot as plt
 
 # ---------------- CONFIG ----------------
 WAQI_TOKEN = "176165c0a8c431b3c5fe786ad9286ed5be4e652f"
@@ -27,36 +26,14 @@ locations = {
     "Vashi": (19.0771, 72.9986),
 }
 
-# ---------------- UI CONFIG ----------------
-st.set_page_config(page_title="AeroGuard – AI AQI Forecast", layout="wide")
-st_autorefresh(interval=REFRESH_SECONDS*1000, limit=None, key="live_refresh")
-st.title("🌬️ AeroGuard – Hyperlocal AQI & AI Forecast (Next 6 Hours)")
-
-persona = st.selectbox("Select User Category", ["General Public", "Children / Elderly", "Outdoor Workers"])
-
 # ---------------- WAQI FETCH ----------------
-@st.cache_data(ttl=REFRESH_SECONDS)
 def fetch_waqi(lat, lon):
-    try:
-        url = f"https://api.waqi.info/feed/geo:{lat};{lon}/?token={WAQI_TOKEN}"
-        r = requests.get(url, timeout=10).json()
-        if r["status"] != "ok":
-            return None
-        d = r["data"]
-        return d.get("aqi"), d.get("iaqi", {}).get("pm25", {}).get("v"), d.get("city", {}).get("name")
-    except:
+    url = f"https://api.waqi.info/feed/geo:{lat};{lon}/?token={WAQI_TOKEN}"
+    r = requests.get(url, timeout=10).json()
+    if r["status"] != "ok":
         return None
-
-def fetch_all_locations(locations):
-    results = {}
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_loc = {executor.submit(fetch_waqi, lat, lon): loc for loc, (lat, lon) in locations.items()}
-        for future in future_to_loc:
-            loc = future_to_loc[future]
-            res = future.result()
-            if res:
-                results[loc] = res
-    return results
+    d = r["data"]
+    return d.get("aqi"), d.get("iaqi", {}).get("pm25", {}).get("v"), d.get("city", {}).get("name")
 
 # ---------------- AQI LOGIC ----------------
 def aqi_category(aqi):
@@ -69,6 +46,7 @@ def aqi_category(aqi):
 
 def advice_block(aqi, persona):
     cat, icon, color = aqi_category(aqi)
+
     base = {
         "Good": "🌿 Air quality is clean and safe for outdoor activities.",
         "Satisfactory": "🙂 Minor discomfort possible for sensitive individuals.",
@@ -77,6 +55,7 @@ def advice_block(aqi, persona):
         "Very Poor": "🚨 Serious health risk. Stay indoors.",
         "Severe": "☠️ Health emergency. Avoid all outdoor exposure."
     }
+
     why = {
         "Good": "Pollutant levels are well below harmful thresholds.",
         "Satisfactory": "Pollution is slightly elevated but within acceptable limits.",
@@ -85,68 +64,100 @@ def advice_block(aqi, persona):
         "Very Poor": "Sustained exposure may cause serious respiratory effects.",
         "Severe": "Extremely high pollution can trigger acute health emergencies."
     }
+
     advice = base[cat]
     reason = why[cat]
 
     if persona == "Children / Elderly" and aqi > 100:
         advice += " 👶👴 Children and elderly are at higher risk."
         reason += " Vulnerable lungs and immunity increase sensitivity."
+
     if persona == "Outdoor Workers" and aqi > 150:
         advice += " 🏭 Outdoor workers should wear N95 masks and take breaks."
         reason += " Continuous exposure increases inhaled pollutant dose."
 
     return f"{icon} {advice}", f"Why: {reason}", color
 
-# ---------------- HISTORY & AI FORECAST ----------------
-def save_history(data_rows):
+# ---------------- HISTORY & AI FORECAST (UPGRADED) ----------------
+def save_history(area, aqi):
     now = datetime.now()
-    new = pd.DataFrame(data_rows, columns=["time","area","aqi"])
+    new = pd.DataFrame([[now, area, aqi]], columns=["time", "area", "aqi"])
+
+    # Safe read: handle empty or non-existent file
     if os.path.exists(HISTORY_FILE) and os.stat(HISTORY_FILE).st_size > 0:
         try:
             df = pd.read_csv(HISTORY_FILE)
         except pd.errors.EmptyDataError:
-            df = pd.DataFrame(columns=["time","area","aqi"])
-        df = pd.concat([df,new], ignore_index=True)
+            df = pd.DataFrame(columns=["time", "area", "aqi"])
+        df = pd.concat([df, new], ignore_index=True)
     else:
         df = new
+
     df["time"] = pd.to_datetime(df["time"])
+    # Keep only last 12 hours
     df = df[df["time"] > (now - timedelta(hours=12))]
     df.to_csv(HISTORY_FILE, index=False)
-    return df
 
-def ai_forecast(area, df_area, current_aqi):
-    if len(df_area) < 4:
+def ai_forecast(area, current_aqi):
+    # Safe read: handle empty or non-existent file
+    if not os.path.exists(HISTORY_FILE) or os.stat(HISTORY_FILE).st_size == 0:
         return current_aqi
-    recent = df_area.tail(6)["aqi"].values
-    trend = (recent[-1]-recent[0])/len(recent)
-    return max(0,min(500,int(current_aqi + trend*6)))
 
-# ---------------- FETCH DATA ----------------
-waqi_results = fetch_all_locations(locations)
+    try:
+        df = pd.read_csv(HISTORY_FILE)
+    except pd.errors.EmptyDataError:
+        return current_aqi
 
-data_rows=[]
-colors=[]
-rows=[]
+    df = df[df["area"] == area]
+    if len(df) < 4:
+        return current_aqi
 
-for loc,res in waqi_results.items():
-    aqi,pm25,station=res
-    data_rows.append([datetime.now(),loc,aqi])
+    recent = df.tail(6)["aqi"].values
+    trend = (recent[-1] - recent[0]) / len(recent)
+    return max(0, min(500, int(current_aqi + trend * 6)))
 
-history_df = save_history(data_rows)
+# ---------------- UI ----------------
+st.set_page_config(page_title="AeroGuard – AI AQI Forecast", layout="wide")
+st.markdown(f"<meta http-equiv='refresh' content='{REFRESH_SECONDS}'>", unsafe_allow_html=True)
 
-for loc,res in waqi_results.items():
-    aqi,pm25,station=res
-    df_area = history_df[history_df["area"]==loc]
-    forecast = ai_forecast(loc, df_area, aqi)
-    cat,icon,_=aqi_category(aqi)
-    advice,why,color=advice_block(aqi, persona)
+st.title("🌬️ AeroGuard – Hyperlocal AQI & AI Forecast (Next 6 Hours)")
+
+persona = st.selectbox(
+    "Select User Category",
+    ["General Public", "Children / Elderly", "Outdoor Workers"]
+)
+
+rows = []
+colors = []
+
+for loc, (lat, lon) in locations.items():
+    res = fetch_waqi(lat, lon)
+    if not res:
+        continue
+
+    aqi, pm25, station = res
+    save_history(loc, aqi)
+    forecast = ai_forecast(loc, aqi)
+
+    cat, icon, _ = aqi_category(aqi)
+    advice, why, color = advice_block(aqi, persona)
+
     rows.append([loc, station, aqi, f"{icon} {cat}", forecast, advice, why])
     colors.append(color)
 
-df = pd.DataFrame(rows, columns=["Area","Nearest Station","AQI Now","Category","AQI (6h Forecast)","Health Advice","Why this advice?"])
+df = pd.DataFrame(rows, columns=[
+    "Area",
+    "Nearest Station",
+    "AQI Now",
+    "Category",
+    "AQI (6h Forecast)",
+    "Health Advice",
+    "Why this advice?"
+])
 
-# ---------------- TABLE ----------------
+# ---------------- TABLE (WRAPPED TEXT) ----------------
 st.subheader("📊 Live AQI, AI Forecast & Health Guidance")
+
 st.data_editor(
     df,
     use_container_width=True,
@@ -160,33 +171,47 @@ st.data_editor(
 
 # ---------------- FORECAST GRAPH ----------------
 st.subheader("📈 AI-Based 6 Hour AQI Forecast")
+
 area_sel = st.selectbox("Select Area", df["Area"])
-now_val = df[df["Area"]==area_sel]["AQI Now"].values[0]
-fut_val = df[df["Area"]==area_sel]["AQI (6h Forecast)"].values[0]
-st.line_chart([now_val,fut_val])
+now_val = df[df["Area"] == area_sel]["AQI Now"].values[0]
+fut_val = df[df["Area"] == area_sel]["AQI (6h Forecast)"].values[0]
+
+fig, ax = plt.subplots()
+ax.plot([0, 6], [now_val, fut_val], marker="o")
+ax.set_xlabel("Hours Ahead")
+ax.set_ylabel("AQI")
+ax.set_title(f"AQI Forecast Trend – {area_sel}")
+st.pyplot(fig)
+
+st.caption("Forecast generated using short-term time-series AI based on recent AQI trends.")
 
 # ---------------- MAP ----------------
-st.subheader("🗺️ Mumbai AQI Map (Trend-Based Coloring)")
-m = folium.Map(location=[19.07,72.88], zoom_start=11)
-for i,r in df.iterrows():
-    trend = r["AQI (6h Forecast)"] - r["AQI Now"]
-    base_color = colors[i]
-    if trend>20:
-        display_color="darkred"
-    elif trend>0:
-        display_color="red"
-    elif trend<-20:
-        display_color="green"
-    elif trend<0:
-        display_color="lightgreen"
-    else:
-        display_color=base_color
+st.subheader("🗺️ Mumbai AQI Map")
+
+m = folium.Map(location=[19.07, 72.88], zoom_start=11)
+
+for i, r in df.iterrows():
     folium.CircleMarker(
         location=locations[r["Area"]],
-        radius=10,
-        color=display_color,
+        radius=9,
+        color=colors[i],
         fill=True,
         fill_opacity=0.8,
-        popup=f"<b>{r['Area']}</b><br>AQI Now: {r['AQI Now']}<br>Forecast (6h): {r['AQI (6h Forecast)']}<br>Trend: {'⬆️' if trend>0 else '⬇️' if trend<0 else '➡️'} {trend:+}"
+        popup=f"""
+        <b>{r['Area']}</b><br>
+        AQI: {r['AQI Now']}<br>
+        Forecast (6h): {r['AQI (6h Forecast)']}
+        """
     ).add_to(m)
-st_folium(m,width=1100,height=500)
+
+st_folium(m, width=1100, height=500)
+
+# ---------------- EXPLANATION ----------------
+st.subheader("ℹ️ How the AI Forecast Works")
+st.markdown("""
+• Uses **real CPCB / SAFAR sensor data** via WAQI  
+• Maintains **rolling AQI history (last 6–12 hours)**  
+• Applies **time-series trend analysis** for short-term forecasting  
+• Predicts **AQI for the next 6 hours**  
+• Advice is **personalized, explainable, and risk-aware**
+""")
