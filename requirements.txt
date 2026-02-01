@@ -4,3 +4,5 @@ requests
 folium
 streamlit-folium
 matplotlib
+numpy
+scikit-learn
